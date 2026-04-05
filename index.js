@@ -1,8 +1,8 @@
 import express from "express";
 import axios from "axios";
 
-const TELEGRAM_TOKEN = "8592428203:AAFNlV4m-zD2FOP65ZMn96pl01q6EXXjNaQ";
-const OPENROUTER_API_KEY = "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";
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 const PORT = process.env.PORT || 3000;
 
