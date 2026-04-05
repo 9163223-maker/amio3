@@ -1,43 +1,64 @@
 const TelegramBot = require("node-telegram-bot-api");
 
-// ===== ТОКЕНЫ =====
-const BOT_TOKEN = process.env.BOT_TOKEN || "PASTE_BOT_TOKEN";
-const OPENROUTER_API_KEY =
-  process.env.OPENROUTER_API_KEY || "PASTE_OPENROUTER_KEY";
+// Если Node ниже 18, раскомментируй:
+// const fetch = require("node-fetch");
 
-// 👉 ВАЖНО: используем авто (бесплатные модели)
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_MODEL =
-  process.env.OPENROUTER_MODEL || "openrouter/auto";
+  process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini";
 
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+if (!TELEGRAM_TOKEN) {
+  throw new Error("TELEGRAM_BOT_TOKEN is missing in env");
+}
 
-// ===== ХРАНЕНИЕ =====
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+
+// =========================
+// ХРАНЕНИЕ В ПАМЯТИ
+// =========================
 const users = {};
 
-function getUser(id) {
-  if (!users[id]) {
-    users[id] = {
-      step: "new",
+function getUser(chatId) {
+  if (!users[chatId]) {
+    users[chatId] = {
+      onboardingStep: "new",
       profile: {
         name: "",
         gender: "neutral",
         tone: "Мягко и тепло",
-        mode: "Просто побудь рядом",
+        supportMode: "Просто побудь рядом",
       },
       history: [],
     };
   }
-  return users[id];
+  return users[chatId];
 }
 
-// ===== КНОПКИ =====
+function resetUser(chatId) {
+  users[chatId] = {
+    onboardingStep: "ask_name",
+    profile: {
+      name: "",
+      gender: "neutral",
+      tone: "Мягко и тепло",
+      supportMode: "Просто побудь рядом",
+    },
+    history: [],
+  };
+  return users[chatId];
+}
+
+// =========================
+// КЛАВИАТУРЫ
+// =========================
 function mainKeyboard() {
   return {
     keyboard: [
       [{ text: "Мне одиноко" }, { text: "Мне тревожно" }],
       [{ text: "Поговори со мной" }, { text: "Побудь рядом" }],
       [{ text: "Помоги собраться" }],
-      [{ text: "⚙️ Настройки" }],
+      [{ text: "⚙️ Настройки" }, { text: "🔄 Пройти опрос заново" }],
     ],
     resize_keyboard: true,
   };
@@ -48,7 +69,7 @@ function genderKeyboard() {
     keyboard: [
       [{ text: "Женский род" }],
       [{ text: "Мужской род" }],
-      [{ text: "Нейтрально" }],
+      [{ text: "Нейтрально, без рода" }],
     ],
     resize_keyboard: true,
     one_time_keyboard: true,
@@ -60,7 +81,7 @@ function toneKeyboard() {
     keyboard: [
       [{ text: "Мягко и тепло" }],
       [{ text: "Спокойно и по делу" }],
-      [{ text: "Как друг" }],
+      [{ text: "Как близкий друг" }],
       [{ text: "Коротко и бережно" }],
     ],
     resize_keyboard: true,
@@ -68,196 +89,336 @@ function toneKeyboard() {
   };
 }
 
-function modeKeyboard() {
+function supportModeKeyboard() {
   return {
     keyboard: [
       [{ text: "Просто побудь рядом" }],
       [{ text: "Задавай вопросы" }],
       [{ text: "Помоги успокоиться" }],
-      [{ text: "Помоги собраться" }],
+      [{ text: "Помоги собраться по шагам" }],
     ],
     resize_keyboard: true,
     one_time_keyboard: true,
   };
 }
 
-// ===== ПРОМПТ =====
-function buildPrompt(profile) {
+// =========================
+// ПРОМПТ
+// =========================
+function buildSystemPrompt(profile) {
+  const nameLine = profile.name
+    ? `Имя пользователя: ${profile.name}.`
+    : "Имя пользователя неизвестно.";
+
   const genderRule =
     profile.gender === "female"
-      ? "Можно использовать женский род."
+      ? "Если это уместно, можно обращаться в женском роде. Не делай это слишком часто."
       : profile.gender === "male"
-      ? "Можно использовать мужской род."
-      : "Не используй род.";
+      ? "Если это уместно, можно обращаться в мужском роде. Не делай это слишком часто."
+      : "Не используй формулировки, где нужно угадывать род пользователя.";
 
   return `
-Ты — бережный русскоязычный бот поддержки.
+Ты — бережный русскоязычный бот эмоциональной поддержки в Telegram.
 
-Правила:
-- Пиши просто, тепло и по-человечески
-- 2–4 коротких абзаца
-- Не используй фразы:
-  "это нормально"
-  "ничего страшного"
-  "просто чувства"
-- Не обесценивай
-- Не философствуй
-- Не играй в психолога
-- Сначала поддержка → потом мягкий шаг
+Твоя задача:
+- отвечать тепло, естественно и по-человечески;
+- помогать человеку почувствовать, что он не один;
+- не звучать как шаблонный психологический бот;
+- не писать кривые и обесценивающие фразы.
 
-Стиль: ${profile.tone}
-Формат помощи: ${profile.mode}
-${genderRule}
+Данные о пользователе:
+- ${nameLine}
+- Предпочитаемый стиль общения: ${profile.tone}.
+- Предпочитаемый формат поддержки: ${profile.supportMode}.
+- ${genderRule}
 
-Примеры хорошего тона:
-- Я рядом
-- Понимаю, сейчас тяжело
-- Давай спокойно
-- Хочешь, я побуду с тобой?
+Правила ответа:
+- Отвечай по-русски.
+- Обычно 2–5 коротких абзацев.
+- Пиши просто, мягко, живо, без канцелярита и пафоса.
+- Не используй фразы вроде:
+  "это нормально",
+  "ничего страшного",
+  "просто чувства",
+  "всё будет хорошо",
+  если они звучат пусто.
+- Не ставь диагнозы.
+- Не говори слишком уверенно о состоянии человека.
+- Не спорь с чувствами пользователя.
+- Не превращай каждый ответ в инструкцию.
+- Сначала покажи присутствие и понимание, потом мягко предложи один следующий шаг.
+- Если человек хочет просто поговорить — разговаривай.
+- Если человек просит помочь собраться — помогай очень конкретно и по шагам.
+- Не пиши длинные списки, если человек в тревоге.
+- Не повторяй в каждом сообщении одно и то же.
+
+Если есть явные признаки риска самоповреждения, суицида или угрозы жизни:
+- отвечай особенно бережно;
+- посоветуй немедленно обратиться к живому человеку рядом;
+- предложи срочно позвонить в экстренные службы или кризисную линию.
+
+Отвечай естественно, тепло и коротко.
   `.trim();
 }
 
-// ===== ИСТОРИЯ =====
-function addHistory(user, role, text) {
-  user.history.push({ role, content: text });
-  if (user.history.length > 10) user.history.shift();
+// =========================
+// ИСТОРИЯ
+// =========================
+function pushHistory(chatId, role, content) {
+  const user = getUser(chatId);
+  user.history.push({ role, content });
+
+  if (user.history.length > 12) {
+    user.history = user.history.slice(-12);
+  }
 }
 
-// ===== AI =====
-async function askAI(user, text) {
-  try {
-    const response = await fetch(
-      "https://openrouter.ai/api/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: OPENROUTER_MODEL,
-          messages: [
-            { role: "system", content: buildPrompt(user.profile) },
-            ...user.history,
-            { role: "user", content: text },
-          ],
-        }),
-      }
-    );
+// =========================
+// FALLBACK
+// =========================
+function getFallbackReply(text) {
+  const t = (text || "").toLowerCase();
 
-    const data = await response.json();
-    return data?.choices?.[0]?.message?.content;
-  } catch (e) {
+  if (t.includes("трев")) {
+    return "Я рядом.\n\nСейчас, похоже, непросто.\n\nХочешь, я просто побуду с тобой или помогу немного снизить напряжение?";
+  }
+
+  if (t.includes("одинок")) {
+    return "Я с тобой.\n\nМне жаль, что сейчас так.\n\nМожем просто поговорить. Что особенно давит в этот момент?";
+  }
+
+  if (t.includes("побудь рядом")) {
+    return "Я здесь.\n\nМожешь ничего не объяснять.\n\nПросто напиши ещё что-нибудь, я рядом.";
+  }
+
+  if (t.includes("собраться")) {
+    return "Давай спокойно.\n\nНазови одну задачу, которая сейчас важнее всего.\n\nМы разложим её на маленькие шаги.";
+  }
+
+  if (t.includes("поговори")) {
+    return "Я рядом.\n\nО чём тебе сейчас хочется сказать в первую очередь?";
+  }
+
+  return "Я рядом.\n\nМожешь написать, что сейчас чувствуешь или что произошло.";
+}
+
+// =========================
+// OPENROUTER
+// =========================
+async function askOpenRouter(chatId, userText) {
+  if (!OPENROUTER_API_KEY) {
     return null;
   }
-}
-
-// ===== START =====
-bot.onText(/\/start/, (msg) => {
-  const user = getUser(msg.chat.id);
-  user.step = "ask_name";
-
-  bot.sendMessage(
-    msg.chat.id,
-    "Привет. Я рядом.\n\nДавай немного настрою общение под тебя.\n\nКак мне к тебе обращаться?"
-  );
-});
-
-// ===== ОСНОВНОЙ ОБРАБОТЧИК =====
-bot.on("message", async (msg) => {
-  const chatId = msg.chat.id;
-  const text = msg.text;
-
-  if (!text || text === "/start") return;
 
   const user = getUser(chatId);
+  const systemPrompt = buildSystemPrompt(user.profile);
 
-  // ===== НАСТРОЙКИ =====
-  if (text === "⚙️ Настройки") {
-    user.step = "ask_name";
-    return bot.sendMessage(chatId, "Как мне к тебе обращаться?");
+  const messages = [
+    { role: "system", content: systemPrompt },
+    ...user.history,
+    { role: "user", content: userText },
+  ];
+
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://amio.local",
+      "X-Title": "Amio Telegram Bot",
+    },
+    body: JSON.stringify({
+      model: OPENROUTER_MODEL,
+      messages,
+      temperature: 0.7,
+      max_tokens: 300,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    console.error("OpenRouter error:", response.status, errorText);
+    return null;
   }
 
-  // ===== ONBOARDING =====
-  if (user.step === "ask_name") {
-    user.profile.name = text;
-    user.step = "ask_gender";
+  const data = await response.json();
+  const content = data?.choices?.[0]?.message?.content?.trim();
 
-    return bot.sendMessage(chatId, "Как обращаться?", {
-      reply_markup: genderKeyboard(),
-    });
+  if (!content) return null;
+  return content;
+}
+
+// =========================
+// ONBOARDING
+// =========================
+async function startOnboarding(chatId) {
+  resetUser(chatId);
+
+  return bot.sendMessage(
+    chatId,
+    "Привет. Я рядом, когда тревожно, одиноко или просто тяжело.\n\nДавай сначала я немного настроюсь под тебя.\n\nКак мне к тебе обращаться?",
+    {
+      reply_markup: { remove_keyboard: true },
+    }
+  );
+}
+
+async function handleOnboarding(chatId, text) {
+  const user = getUser(chatId);
+
+  if (user.onboardingStep === "ask_name") {
+    user.profile.name = text.trim().slice(0, 40);
+    user.onboardingStep = "ask_gender";
+
+    return bot.sendMessage(
+      chatId,
+      "Как тебе комфортнее, чтобы я обращался?",
+      {
+        reply_markup: genderKeyboard(),
+      }
+    );
   }
 
-  if (user.step === "ask_gender") {
-    if (text.includes("Жен")) user.profile.gender = "female";
-    else if (text.includes("Муж")) user.profile.gender = "male";
+  if (user.onboardingStep === "ask_gender") {
+    if (text === "Женский род") user.profile.gender = "female";
+    else if (text === "Мужской род") user.profile.gender = "male";
     else user.profile.gender = "neutral";
 
-    user.step = "ask_tone";
+    user.onboardingStep = "ask_tone";
 
-    return bot.sendMessage(chatId, "Стиль общения?", {
+    return bot.sendMessage(chatId, "Какой стиль общения тебе ближе?", {
       reply_markup: toneKeyboard(),
     });
   }
 
-  if (user.step === "ask_tone") {
+  if (user.onboardingStep === "ask_tone") {
     user.profile.tone = text;
-    user.step = "ask_mode";
+    user.onboardingStep = "ask_support_mode";
 
-    return bot.sendMessage(chatId, "Что важно в поддержке?", {
-      reply_markup: modeKeyboard(),
+    return bot.sendMessage(chatId, "Когда тебе тяжело, что обычно нужнее?", {
+      reply_markup: supportModeKeyboard(),
     });
   }
 
-  if (user.step === "ask_mode") {
-    user.profile.mode = text;
-    user.step = "done";
+  if (user.onboardingStep === "ask_support_mode") {
+    user.profile.supportMode = text;
+    user.onboardingStep = "done";
 
-    return bot.sendMessage(chatId, "Я рядом.", {
+    return bot.sendMessage(
+      chatId,
+      `Спасибо${user.profile.name ? `, ${user.profile.name}` : ""}. Я запомнил настройки и буду общаться так, как тебе комфортно.`,
+      {
+        reply_markup: mainKeyboard(),
+      }
+    );
+  }
+}
+
+// =========================
+// КОМАНДЫ
+// =========================
+bot.onText(/\/start/, async (msg) => {
+  await startOnboarding(msg.chat.id);
+});
+
+bot.onText(/\/reset/, async (msg) => {
+  await startOnboarding(msg.chat.id);
+});
+
+// =========================
+// ОСНОВНОЙ ОБРАБОТЧИК
+// =========================
+bot.on("message", async (msg) => {
+  try {
+    const chatId = msg.chat.id;
+    const text = msg.text?.trim();
+
+    if (!text) return;
+    if (text === "/start" || text === "/reset") return;
+
+    const user = getUser(chatId);
+
+    if (text === "🔄 Пройти опрос заново" || text === "⚙️ Настройки") {
+      return startOnboarding(chatId);
+    }
+
+    if (
+      user.onboardingStep === "ask_name" ||
+      user.onboardingStep === "ask_gender" ||
+      user.onboardingStep === "ask_tone" ||
+      user.onboardingStep === "ask_support_mode"
+    ) {
+      return handleOnboarding(chatId, text);
+    }
+
+    if (user.onboardingStep === "new") {
+      return startOnboarding(chatId);
+    }
+
+    if (text === "Мне тревожно") {
+      const reply =
+        "Я рядом.\n\nСейчас может быть тяжело и шумно внутри.\n\nХочешь, я просто побуду с тобой или помогу чуть-чуть снизить тревогу прямо сейчас?";
+      pushHistory(chatId, "user", text);
+      pushHistory(chatId, "assistant", reply);
+      return bot.sendMessage(chatId, reply, { reply_markup: mainKeyboard() });
+    }
+
+    if (text === "Мне одиноко") {
+      const reply =
+        "Я с тобой.\n\nМне жаль, что сейчас так.\n\nМожем просто поговорить. Что сейчас чувствуется сильнее всего?";
+      pushHistory(chatId, "user", text);
+      pushHistory(chatId, "assistant", reply);
+      return bot.sendMessage(chatId, reply, { reply_markup: mainKeyboard() });
+    }
+
+    if (text === "Побудь рядом") {
+      const reply =
+        "Я здесь.\n\nНе нужно сейчас ничего объяснять идеально.\n\nМожешь просто писать коротко, как идёт.";
+      pushHistory(chatId, "user", text);
+      pushHistory(chatId, "assistant", reply);
+      return bot.sendMessage(chatId, reply, { reply_markup: mainKeyboard() });
+    }
+
+    if (text === "Поговори со мной") {
+      const reply =
+        "Я рядом.\n\nО чём тебе сейчас хочется поговорить в первую очередь?";
+      pushHistory(chatId, "user", text);
+      pushHistory(chatId, "assistant", reply);
+      return bot.sendMessage(chatId, reply, { reply_markup: mainKeyboard() });
+    }
+
+    if (text === "Помоги собраться") {
+      const reply =
+        "Давай очень спокойно.\n\nНапиши одну задачу, которую нужно сделать первой.\n\nМы разложим её на маленькие шаги.";
+      pushHistory(chatId, "user", text);
+      pushHistory(chatId, "assistant", reply);
+      return bot.sendMessage(chatId, reply, { reply_markup: mainKeyboard() });
+    }
+
+    pushHistory(chatId, "user", text);
+
+    let aiReply = null;
+    try {
+      aiReply = await askOpenRouter(chatId, text);
+    } catch (e) {
+      console.error("AI request failed:", e);
+    }
+
+    const finalReply = aiReply || getFallbackReply(text);
+
+    pushHistory(chatId, "assistant", finalReply);
+
+    return bot.sendMessage(chatId, finalReply, {
       reply_markup: mainKeyboard(),
     });
-  }
+  } catch (error) {
+    console.error("Bot error:", error);
 
-  // ===== БЫСТРЫЕ СЦЕНАРИИ =====
-  if (text === "Мне тревожно") {
     return bot.sendMessage(
-      chatId,
-      "Я рядом.\n\nХочешь просто побыть в тишине или немного снизим тревогу?"
+      msg.chat.id,
+      "Я рядом.\n\nУ меня сейчас что-то не сработало, но можешь написать ещё раз."
     );
   }
-
-  if (text === "Мне одиноко") {
-    return bot.sendMessage(
-      chatId,
-      "Я с тобой.\n\nМожем просто поговорить. Что сейчас больше всего чувствуешь?"
-    );
-  }
-
-  if (text === "Побудь рядом") {
-    return bot.sendMessage(chatId, "Я здесь.\n\nМожешь просто писать.");
-  }
-
-  if (text === "Помоги собраться") {
-    return bot.sendMessage(
-      chatId,
-      "Давай спокойно.\n\nНазови одну задачу — разложим её."
-    );
-  }
-
-  // ===== AI ОТВЕТ =====
-  addHistory(user, "user", text);
-
-  let reply = await askAI(user, text);
-
-  if (!reply) {
-    reply = "Я рядом.\n\nНапиши, что сейчас происходит.";
-  }
-
-  addHistory(user, "assistant", reply);
-
-  bot.sendMessage(chatId, reply, {
-    reply_markup: mainKeyboard(),
-  });
 });
 
 console.log("Bot is running...");
