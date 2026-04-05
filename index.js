@@ -6,7 +6,7 @@ const TelegramBot = require("node-telegram-bot-api");
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_MODEL =
-  process.env.OPENROUTER_MODEL || "openrouter/auto";
+  process.env.OPENROUTER_MODEL || "openrouter/free";
 
 if (!TELEGRAM_TOKEN) {
   throw new Error("TELEGRAM_BOT_TOKEN is missing in env");
