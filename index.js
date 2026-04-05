@@ -1,160 +1,263 @@
-import express from "express";
-import axios from "axios";
+const TelegramBot = require("node-telegram-bot-api");
 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const PORT = process.env.PORT || 3000;
+// ===== ТОКЕНЫ =====
+const BOT_TOKEN = process.env.BOT_TOKEN || "PASTE_BOT_TOKEN";
+const OPENROUTER_API_KEY =
+  process.env.OPENROUTER_API_KEY || "PASTE_OPENROUTER_KEY";
 
-const app = express();
-app.use(express.json());
+// 👉 ВАЖНО: используем авто (бесплатные модели)
+const OPENROUTER_MODEL =
+  process.env.OPENROUTER_MODEL || "openrouter/auto";
 
-const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
+const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-function keyboard() {
+// ===== ХРАНЕНИЕ =====
+const users = {};
+
+function getUser(id) {
+  if (!users[id]) {
+    users[id] = {
+      step: "new",
+      profile: {
+        name: "",
+        gender: "neutral",
+        tone: "Мягко и тепло",
+        mode: "Просто побудь рядом",
+      },
+      history: [],
+    };
+  }
+  return users[id];
+}
+
+// ===== КНОПКИ =====
+function mainKeyboard() {
   return {
     keyboard: [
       [{ text: "Мне одиноко" }, { text: "Мне тревожно" }],
       [{ text: "Поговори со мной" }, { text: "Побудь рядом" }],
       [{ text: "Помоги собраться" }],
-      [{ text: "⚙️  Настройки" }, { text: "⭐ Amio Pro" }]
+      [{ text: "⚙️ Настройки" }],
     ],
-    resize_keyboard: true
+    resize_keyboard: true,
   };
 }
 
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+function genderKeyboard() {
+  return {
+    keyboard: [
+      [{ text: "Женский род" }],
+      [{ text: "Мужской род" }],
+      [{ text: "Нейтрально" }],
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: true,
+  };
 }
 
-function clean(text) {
-  let t = text || "";
-
-  const bad = [
-    "я понимаю",
-    "давай попробуем",
-    "звучит как",
-    "это может ощущаться",
-    "я здесь, чтобы помочь",
-    "хочешь, я помогу"
-  ];
-
-  bad.forEach(p => {
-    t = t.replace(new RegExp(p, "gi"), "");
-  });
-
-  t = t.trim();
-
-  if (!t) {
-    t = "я здесь";
-  }
-
-  return t;
+function toneKeyboard() {
+  return {
+    keyboard: [
+      [{ text: "Мягко и тепло" }],
+      [{ text: "Спокойно и по делу" }],
+      [{ text: "Как друг" }],
+      [{ text: "Коротко и бережно" }],
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: true,
+  };
 }
 
-function prompt() {
+function modeKeyboard() {
+  return {
+    keyboard: [
+      [{ text: "Просто побудь рядом" }],
+      [{ text: "Задавай вопросы" }],
+      [{ text: "Помоги успокоиться" }],
+      [{ text: "Помоги собраться" }],
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: true,
+  };
+}
+
+// ===== ПРОМПТ =====
+function buildPrompt(profile) {
+  const genderRule =
+    profile.gender === "female"
+      ? "Можно использовать женский род."
+      : profile.gender === "male"
+      ? "Можно использовать мужской род."
+      : "Не используй род.";
+
   return `
-Ты — Amio.
+Ты — бережный русскоязычный бот поддержки.
 
-Коротко, просто, по-человечески.
-1–3 коротких предложения.
+Правила:
+- Пиши просто, тепло и по-человечески
+- 2–4 коротких абзаца
+- Не используй фразы:
+  "это нормально"
+  "ничего страшного"
+  "просто чувства"
+- Не обесценивай
+- Не философствуй
+- Не играй в психолога
+- Сначала поддержка → потом мягкий шаг
 
-Не используй:
-- "я понимаю"
-- длинные объяснения
-- списки
-- слишком книжный язык
+Стиль: ${profile.tone}
+Формат помощи: ${profile.mode}
+${genderRule}
 
-Тон:
-тёплый, спокойный, немного живой.
-
-Ты рядом, а не решаешь проблему.
-`;
+Примеры хорошего тона:
+- Я рядом
+- Понимаю, сейчас тяжело
+- Давай спокойно
+- Хочешь, я побуду с тобой?
+  `.trim();
 }
 
-async function generateReply(userMessage) {
+// ===== ИСТОРИЯ =====
+function addHistory(user, role, text) {
+  user.history.push({ role, content: text });
+  if (user.history.length > 10) user.history.shift();
+}
+
+// ===== AI =====
+async function askAI(user, text) {
   try {
-    const res = await axios.post(
+    const response = await fetch(
       "https://openrouter.ai/api/v1/chat/completions",
       {
-        model: "openrouter/free",
-        messages: [
-          { role: "system", content: prompt() },
-          { role: "user", content: userMessage }
-        ]
-      },
-      {
+        method: "POST",
         headers: {
           Authorization: `Bearer ${OPENROUTER_API_KEY}`,
           "Content-Type": "application/json",
-          "X-Title": "Amio"
-        }
+        },
+        body: JSON.stringify({
+          model: OPENROUTER_MODEL,
+          messages: [
+            { role: "system", content: buildPrompt(user.profile) },
+            ...user.history,
+            { role: "user", content: text },
+          ],
+        }),
       }
     );
 
-    console.log("AI RESPONSE:", JSON.stringify(res.data, null, 2));
-
-    return res.data.choices?.[0]?.message?.content || "я здесь";
-  } catch (err) {
-    console.log("OPENROUTER ERROR:", err.response?.data || err.message);
-    return "сейчас не отвечаю. попробуй ещё раз";
+    const data = await response.json();
+    return data?.choices?.[0]?.message?.content;
+  } catch (e) {
+    return null;
   }
 }
 
-async function sendMessage(chatId, text) {
-  try {
-    await axios.post(`${TELEGRAM_API}/sendMessage`, {
-      chat_id: chatId,
-      text,
-      reply_markup: keyboard()
+// ===== START =====
+bot.onText(/\/start/, (msg) => {
+  const user = getUser(msg.chat.id);
+  user.step = "ask_name";
+
+  bot.sendMessage(
+    msg.chat.id,
+    "Привет. Я рядом.\n\nДавай немного настрою общение под тебя.\n\nКак мне к тебе обращаться?"
+  );
+});
+
+// ===== ОСНОВНОЙ ОБРАБОТЧИК =====
+bot.on("message", async (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text;
+
+  if (!text || text === "/start") return;
+
+  const user = getUser(chatId);
+
+  // ===== НАСТРОЙКИ =====
+  if (text === "⚙️ Настройки") {
+    user.step = "ask_name";
+    return bot.sendMessage(chatId, "Как мне к тебе обращаться?");
+  }
+
+  // ===== ONBOARDING =====
+  if (user.step === "ask_name") {
+    user.profile.name = text;
+    user.step = "ask_gender";
+
+    return bot.sendMessage(chatId, "Как обращаться?", {
+      reply_markup: genderKeyboard(),
     });
-  } catch (err) {
-    console.log("TELEGRAM SEND ERROR:", err.response?.data || err.message);
   }
-}
 
-app.post("/webhook", async (req, res) => {
-  try {
-    console.log("WEBHOOK BODY:", JSON.stringify(req.body, null, 2));
+  if (user.step === "ask_gender") {
+    if (text.includes("Жен")) user.profile.gender = "female";
+    else if (text.includes("Муж")) user.profile.gender = "male";
+    else user.profile.gender = "neutral";
 
-    const message = req.body?.message;
+    user.step = "ask_tone";
 
-    if (!message) {
-      return res.sendStatus(200);
-    }
-
-    const chatId = message.chat?.id;
-    const text = message.text;
-
-    console.log("USER:", text);
-
-    if (!chatId || !text) {
-      return res.sendStatus(200);
-    }
-
-    if (text === "/start") {
-      await sendMessage(chatId, "привет. я amio. как ты?");
-      return res.sendStatus(200);
-    }
-
-    let reply = await generateReply(text);
-    reply = clean(reply);
-
-    await delay(900);
-    await sendMessage(chatId, reply);
-
-    return res.sendStatus(200);
-  } catch (err) {
-    console.log("SERVER ERROR:", err.response?.data || err.message);
-    return res.sendStatus(200);
+    return bot.sendMessage(chatId, "Стиль общения?", {
+      reply_markup: toneKeyboard(),
+    });
   }
+
+  if (user.step === "ask_tone") {
+    user.profile.tone = text;
+    user.step = "ask_mode";
+
+    return bot.sendMessage(chatId, "Что важно в поддержке?", {
+      reply_markup: modeKeyboard(),
+    });
+  }
+
+  if (user.step === "ask_mode") {
+    user.profile.mode = text;
+    user.step = "done";
+
+    return bot.sendMessage(chatId, "Я рядом.", {
+      reply_markup: mainKeyboard(),
+    });
+  }
+
+  // ===== БЫСТРЫЕ СЦЕНАРИИ =====
+  if (text === "Мне тревожно") {
+    return bot.sendMessage(
+      chatId,
+      "Я рядом.\n\nХочешь просто побыть в тишине или немного снизим тревогу?"
+    );
+  }
+
+  if (text === "Мне одиноко") {
+    return bot.sendMessage(
+      chatId,
+      "Я с тобой.\n\nМожем просто поговорить. Что сейчас больше всего чувствуешь?"
+    );
+  }
+
+  if (text === "Побудь рядом") {
+    return bot.sendMessage(chatId, "Я здесь.\n\nМожешь просто писать.");
+  }
+
+  if (text === "Помоги собраться") {
+    return bot.sendMessage(
+      chatId,
+      "Давай спокойно.\n\nНазови одну задачу — разложим её."
+    );
+  }
+
+  // ===== AI ОТВЕТ =====
+  addHistory(user, "user", text);
+
+  let reply = await askAI(user, text);
+
+  if (!reply) {
+    reply = "Я рядом.\n\nНапиши, что сейчас происходит.";
+  }
+
+  addHistory(user, "assistant", reply);
+
+  bot.sendMessage(chatId, reply, {
+    reply_markup: mainKeyboard(),
+  });
 });
 
-app.get("/", (req, res) => {
-  res.send("Amio running");
-});
-
-app.listen(PORT, () => {
-  console.log("Server started on port " + PORT);
-  console.log("TOKEN PRESENT:", !!TELEGRAM_TOKEN);
-  console.log("OPENROUTER KEY PRESENT:", !!OPENROUTER_API_KEY);
-});
+console.log("Bot is running...");
