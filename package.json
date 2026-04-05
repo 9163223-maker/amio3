@@ -1,6 +1,7 @@
 {
   "name": "amio-bot",
   "version": "1.0.0",
+  "description": "Amio emotional support Telegram bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
