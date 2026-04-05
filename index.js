@@ -81,7 +81,7 @@ async function generateReply(userMessage) {
   const res = await axios.post(
     "https://openrouter.ai/api/v1/chat/completions",
     {
-      model: "mistralai/mistral-7b-instruct",
+      model: "openrouter/free",
       messages: [
         { role: "system", content: prompt() },
         { role: "user", content: userMessage }
