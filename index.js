@@ -16,7 +16,7 @@ function keyboard() {
       [{ text: "Мне одиноко" }, { text: "Мне тревожно" }],
       [{ text: "Поговори со мной" }, { text: "Побудь рядом" }],
       [{ text: "Помоги собраться" }],
-      [{ text: "⚙️ Настройки" }, { text: "⭐ Amio Pro" }]
+      [{ text: "⚙️  Настройки" }, { text: "⭐ Amio Pro" }]
     ],
     resize_keyboard: true
   };
@@ -42,7 +42,13 @@ function clean(text) {
     t = t.replace(new RegExp(p, "gi"), "");
   });
 
-  return t.trim() || "я здесь";
+  t = t.trim();
+
+  if (!t) {
+    t = "я здесь";
+  }
+
+  return t;
 }
 
 function prompt() {
@@ -59,7 +65,7 @@ function prompt() {
 - слишком книжный язык
 
 Тон:
-тёплый, спокойный, немного живой, искренний.
+тёплый, спокойный, немного живой.
 
 Ты рядом, а не решаешь проблему.
 `;
@@ -108,9 +114,9 @@ async function sendMessage(chatId, text) {
 
 app.post("/webhook", async (req, res) => {
   try {
-    const message = req.body?.message;
-
     console.log("WEBHOOK BODY:", JSON.stringify(req.body, null, 2));
+
+    const message = req.body?.message;
 
     if (!message) {
       return res.sendStatus(200);
