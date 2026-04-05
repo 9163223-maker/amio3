@@ -3,7 +3,6 @@ import axios from "axios";
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-
 const PORT = process.env.PORT || 3000;
 
 const app = express();
@@ -11,7 +10,6 @@ app.use(express.json());
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
-// ---------------- UI ----------------
 function keyboard() {
   return {
     keyboard: [
@@ -24,7 +22,6 @@ function keyboard() {
   };
 }
 
-// ---------------- Utils ----------------
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -45,76 +42,88 @@ function clean(text) {
     t = t.replace(new RegExp(p, "gi"), "");
   });
 
-  return t.trim();
+  return t.trim() || "я здесь";
 }
 
-// ---------------- Amio prompt ----------------
 function prompt() {
   return `
 Ты — Amio.
 
-Стиль:
-коротко, по-человечески, без книжных фраз.
+Коротко, просто, по-человечески.
+1–3 коротких предложения.
 
-Нельзя:
+Не используй:
 - "я понимаю"
 - длинные объяснения
 - списки
-- быть слишком правильным
+- слишком книжный язык
 
 Тон:
-тёплый, спокойный, немного живой
+тёплый, спокойный, немного живой.
 
-Формат:
-1–3 коротких предложения
-
-Иногда можно:
-"ок", "ну да", "жёстко", "классика" (редко)
-
-Ты не решаешь проблему.
-Ты рядом.
+Ты рядом, а не решаешь проблему.
 `;
 }
 
-// ---------------- AI ----------------
 async function generateReply(userMessage) {
-  const res = await axios.post(
-    "https://openrouter.ai/api/v1/chat/completions",
-    {
-      model: "openrouter/free",
-      messages: [
-        { role: "system", content: prompt() },
-        { role: "user", content: userMessage }
-      ]
-    },
-    {
-      headers: {
-        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json"
-      }
-    }
-  );
-
-  return res.data.choices[0].message.content;
-}
-
-// ---------------- Telegram ----------------
-async function sendMessage(chatId, text) {
-  await axios.post(`${TELEGRAM_API}/sendMessage`, {
-    chat_id: chatId,
-    text,
-    reply_markup: keyboard()
-  });
-}
-
-// ---------------- Webhook ----------------
-app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   try {
-    const message = req.body.message;
-    const chatId = message.chat.id;
+    const res = await axios.post(
+      "https://openrouter.ai/api/v1/chat/completions",
+      {
+        model: "openrouter/free",
+        messages: [
+          { role: "system", content: prompt() },
+          { role: "user", content: userMessage }
+        ]
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+          "Content-Type": "application/json",
+          "X-Title": "Amio"
+        }
+      }
+    );
+
+    console.log("AI RESPONSE:", JSON.stringify(res.data, null, 2));
+
+    return res.data.choices?.[0]?.message?.content || "я здесь";
+  } catch (err) {
+    console.log("OPENROUTER ERROR:", err.response?.data || err.message);
+    return "сейчас не отвечаю. попробуй ещё раз";
+  }
+}
+
+async function sendMessage(chatId, text) {
+  try {
+    await axios.post(`${TELEGRAM_API}/sendMessage`, {
+      chat_id: chatId,
+      text,
+      reply_markup: keyboard()
+    });
+  } catch (err) {
+    console.log("TELEGRAM SEND ERROR:", err.response?.data || err.message);
+  }
+}
+
+app.post("/webhook", async (req, res) => {
+  try {
+    const message = req.body?.message;
+
+    console.log("WEBHOOK BODY:", JSON.stringify(req.body, null, 2));
+
+    if (!message) {
+      return res.sendStatus(200);
+    }
+
+    const chatId = message.chat?.id;
     const text = message.text;
 
-    if (!text) return res.sendStatus(200);
+    console.log("USER:", text);
+
+    if (!chatId || !text) {
+      return res.sendStatus(200);
+    }
 
     if (text === "/start") {
       await sendMessage(chatId, "привет. я amio. как ты?");
@@ -127,18 +136,19 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     await delay(900);
     await sendMessage(chatId, reply);
 
-    res.sendStatus(200);
+    return res.sendStatus(200);
   } catch (err) {
-    console.log(err.response?.data || err.message);
-    res.sendStatus(200);
+    console.log("SERVER ERROR:", err.response?.data || err.message);
+    return res.sendStatus(200);
   }
 });
 
-// ---------------- Health ----------------
 app.get("/", (req, res) => {
   res.send("Amio running");
 });
 
 app.listen(PORT, () => {
   console.log("Server started on port " + PORT);
+  console.log("TOKEN PRESENT:", !!TELEGRAM_TOKEN);
+  console.log("OPENROUTER KEY PRESENT:", !!OPENROUTER_API_KEY);
 });
