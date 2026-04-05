@@ -2,7 +2,7 @@ import express from "express";
 import axios from "axios";
 
 const TELEGRAM_TOKEN = "8592428203:AAFNlV4m-zD2FOP65ZMn96pl01q6EXXjNaQ";
-const OPENROUTER_API_KEY = "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";
+const OPENROUTER_API_KEY = "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";
 
 const PORT = process.env.PORT || 3000;
 
