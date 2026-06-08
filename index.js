@@ -6,15 +6,19 @@ const TelegramBot = require("node-telegram-bot-api");
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openrouter/free";
+const OPENROUTER_FALLBACK_MODELS =
+  process.env.OPENROUTER_FALLBACK_MODELS || "openrouter/free";
 const BOOT_TIME = new Date().toISOString();
 const DEBUG_EVENTS_LIMIT = 60;
 const debugEvents = [];
 
 console.log(`[Amio] boot ${BOOT_TIME}`);
 console.log(`[Amio] OpenRouter model: ${OPENROUTER_MODEL}`);
-console.log("[Amio] redeploy marker: 2026-06-08-slash-debug-v3");
+console.log(`[Amio] OpenRouter fallback models: ${OPENROUTER_FALLBACK_MODELS}`);
+console.log("[Amio] redeploy marker: 2026-06-08-openrouter-failover-v4");
 pushDebugEvent("boot", {
   model: OPENROUTER_MODEL,
+  fallbackModels: getCandidateModels(),
   hasOpenRouterKey: Boolean(OPENROUTER_API_KEY),
 });
 
@@ -160,9 +164,20 @@ function truncateText(value, max = 220) {
   const text =
     typeof value === "string" ? value : JSON.stringify(value, null, 0) || "";
 
-  const clean = text.replace(/\s+/g, " ").trim();
+  const clean = text.replace(/https?:\/\/\S+/gi, "[link]").replace(/\s+/g, " ").trim();
   if (clean.length <= max) return clean;
   return `${clean.slice(0, max)}…`;
+}
+
+function getCandidateModels() {
+  const models = [
+    OPENROUTER_MODEL,
+    ...OPENROUTER_FALLBACK_MODELS.split(","),
+  ]
+    .map((model) => model.trim())
+    .filter(Boolean);
+
+  return [...new Set(models)];
 }
 
 function pushDebugEvent(type, details = {}) {
@@ -210,6 +225,7 @@ function formatDebugReport(chatId, user) {
     `Now: ${new Date().toISOString()}`,
     `Chat ID: ${chatId}`,
     `Model env: ${OPENROUTER_MODEL}`,
+    `Fallback models: ${getCandidateModels().join(", ")}`,
     `OpenRouter key: ${OPENROUTER_API_KEY ? "present" : "missing"}`,
     `Onboarding: ${user.onboardingStep}`,
     `History messages: ${user.history.length}`,
@@ -234,6 +250,41 @@ function formatDebugReport(chatId, user) {
   return report.length > 3900
     ? `${report.slice(0, 3800)}\n\n…обрезано. Используй /debug_clear и повтори тест.`
     : report;
+}
+
+function parseOpenRouterError(errorText = "") {
+  let parsed = null;
+  let rawParsed = null;
+
+  try {
+    parsed = JSON.parse(errorText);
+  } catch (error) {
+    return {
+      message: truncateText(errorText, 300),
+    };
+  }
+
+  const error = parsed?.error || parsed;
+  const metadata = error?.metadata || {};
+
+  if (metadata.raw) {
+    try {
+      rawParsed = JSON.parse(metadata.raw);
+    } catch (rawError) {
+      rawParsed = null;
+    }
+  }
+
+  return {
+    message: truncateText(rawParsed?.message || error?.message || errorText, 300),
+    code: rawParsed?.code || error?.code,
+    providerName: metadata.provider_name,
+    isByok: metadata.is_byok,
+    retryAfterSeconds:
+      rawParsed?.retry_after_seconds ||
+      rawParsed?.retry_after_seconds_raw ||
+      metadata.retry_after_seconds,
+  };
 }
 
 function logAiDiagnostic(reason, details = {}) {
@@ -399,7 +450,7 @@ function getFallbackReply(text, profile = {}) {
     return "Блин, неприятно, когда переживаешь, а всё идёт не туда.\n\nЕсть ещё ощущение, что могут зацепиться?";
   }
 
-  return "Понял тебя.\n\nЯ не хочу отвечать сухо, но сейчас у меня не получилось нормально достучаться до нейросети. Напиши ещё раз — попробую подхватить живее.";
+  return "Понял тебя.\n\nСейчас нейросеть не ответила нормально, поэтому я пишу запасным ответом. Попробуй ещё раз через минуту — я подхвачу.";
 }
 
 // =========================
@@ -491,6 +542,7 @@ async function askOpenRouter(chatId, userText) {
 
   const user = getUser(chatId);
   const systemPrompt = buildSystemPrompt(user.profile);
+  const candidateModels = getCandidateModels();
 
   const messages = [
     { role: "system", content: systemPrompt },
@@ -498,82 +550,111 @@ async function askOpenRouter(chatId, userText) {
     { role: "user", content: userText },
   ];
 
-  pushDebugEvent("openrouter-request", {
+  pushDebugEvent("openrouter-model-plan", {
     chatId,
-    model: OPENROUTER_MODEL,
-    historyMessages: user.history.length,
-    userTextLength: userText.length,
-    userTextPreview: userText.slice(0, 160),
+    models: candidateModels,
   });
 
-  console.log("[Amio] OpenRouter request:", {
-    chatId,
-    model: OPENROUTER_MODEL,
-    historyMessages: user.history.length,
-  });
-
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://amio.local",
-      "X-Title": "Amio Telegram Bot",
-    },
-    body: JSON.stringify({
-      model: OPENROUTER_MODEL,
-      messages,
-      temperature: 0.8,
-      top_p: 0.9,
-      presence_penalty: 0.3,
-      frequency_penalty: 0.2,
-      max_tokens: 450,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => "");
-    logAiDiagnostic("openrouter-http-error", {
+  for (const model of candidateModels) {
+    pushDebugEvent("openrouter-request", {
       chatId,
-      status: response.status,
-      body: errorText.slice(0, 500),
+      model,
+      historyMessages: user.history.length,
+      userTextLength: userText.length,
+      userTextPreview: userText.slice(0, 160),
     });
-    return null;
-  }
 
-  const data = await response.json();
-  const content = data?.choices?.[0]?.message?.content?.trim();
-  const finishReason = data?.choices?.[0]?.finish_reason;
-
-  pushDebugEvent("openrouter-response", {
-    chatId,
-    requestedModel: OPENROUTER_MODEL,
-    returnedModel: data?.model,
-    finishReason,
-    hasContent: Boolean(content),
-    contentLength: content ? content.length : 0,
-    contentPreview: content ? content.slice(0, 220) : "",
-  });
-
-  console.log("[Amio] OpenRouter response:", {
-    chatId,
-    requestedModel: OPENROUTER_MODEL,
-    returnedModel: data?.model,
-    finishReason,
-    hasContent: Boolean(content),
-    contentLength: content ? content.length : 0,
-  });
-
-  if (!content) {
-    logAiDiagnostic("openrouter-empty-content", {
+    console.log("[Amio] OpenRouter request:", {
       chatId,
+      model,
+      historyMessages: user.history.length,
+    });
+
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://amio.local",
+        "X-Title": "Amio Telegram Bot",
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature: 0.8,
+        top_p: 0.9,
+        presence_penalty: 0.3,
+        frequency_penalty: 0.2,
+        max_tokens: 450,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      const parsedError = parseOpenRouterError(errorText);
+
+      logAiDiagnostic("openrouter-http-error", {
+        chatId,
+        model,
+        status: response.status,
+        ...parsedError,
+      });
+
+      if ([400, 429, 500, 502, 503, 504].includes(response.status)) {
+        pushDebugEvent("openrouter-try-next-model", {
+          chatId,
+          failedModel: model,
+          status: response.status,
+          reason: parsedError.message,
+        });
+        continue;
+      }
+
+      return null;
+    }
+
+    const data = await response.json();
+    const content = data?.choices?.[0]?.message?.content?.trim();
+    const finishReason = data?.choices?.[0]?.finish_reason;
+
+    pushDebugEvent("openrouter-response", {
+      chatId,
+      requestedModel: model,
       returnedModel: data?.model,
       finishReason,
+      hasContent: Boolean(content),
+      contentLength: content ? content.length : 0,
+      contentPreview: content ? content.slice(0, 220) : "",
     });
-    return null;
+
+    console.log("[Amio] OpenRouter response:", {
+      chatId,
+      requestedModel: model,
+      returnedModel: data?.model,
+      finishReason,
+      hasContent: Boolean(content),
+      contentLength: content ? content.length : 0,
+    });
+
+    if (!content) {
+      logAiDiagnostic("openrouter-empty-content", {
+        chatId,
+        requestedModel: model,
+        returnedModel: data?.model,
+        finishReason,
+      });
+      continue;
+    }
+
+    return content;
   }
 
-  return content;
+  logAiDiagnostic("openrouter-all-models-failed", {
+    chatId,
+    triedModels: candidateModels,
+  });
+
+  return null;
 }
 
 // =========================
@@ -649,7 +730,9 @@ bot.onText(/\/debug(?:@\w+)?/, async (msg) => {
 
   pushDebugEvent("debug-command", { chatId });
 
-  return bot.sendMessage(chatId, formatDebugReport(chatId, user));
+  return bot.sendMessage(chatId, formatDebugReport(chatId, user), {
+    disable_web_page_preview: true,
+  });
 });
 
 bot.onText(/\/debug_clear(?:@\w+)?/, async (msg) => {
@@ -659,7 +742,8 @@ bot.onText(/\/debug_clear(?:@\w+)?/, async (msg) => {
 
   return bot.sendMessage(
     chatId,
-    "Debug-отчёт очищен для этого чата. Теперь отправь тестовое сообщение и вызови /debug."
+    "Debug-отчёт очищен для этого чата. Теперь отправь тестовое сообщение и вызови /debug.",
+    { disable_web_page_preview: true }
   );
 });
 
