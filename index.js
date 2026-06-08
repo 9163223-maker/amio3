@@ -9,7 +9,7 @@ const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openrouter/free";
 
 console.log(`[Amio] boot ${new Date().toISOString()}`);
 console.log(`[Amio] OpenRouter model: ${OPENROUTER_MODEL}`);
-console.log("[Amio] redeploy marker: 2026-06-08-model-env-check");
+console.log("[Amio] redeploy marker: 2026-06-08-ai-diagnostics-v2");
 
 if (!TELEGRAM_TOKEN) {
   throw new Error("TELEGRAM_BOT_TOKEN is missing in env");
@@ -149,6 +149,14 @@ function isTooSimilar(a = "", b = "") {
   return false;
 }
 
+function logAiDiagnostic(reason, details = {}) {
+  console.warn("[Amio] AI diagnostic:", {
+    reason,
+    model: OPENROUTER_MODEL,
+    ...details,
+  });
+}
+
 // =========================
 // ПРОМПТ
 // =========================
@@ -198,7 +206,7 @@ function buildSystemPrompt(profile) {
 - Не путай имя пользователя и имя бота.
 - Если пользователь спрашивает, как зовут его, а имя известно, ответь этим именем.
 
-Если пользователь пишет про прогулку, фильм, дождь, улицу, еду, день, усталость, одиночество — реагируй как нормальный живой человек, а не как бот поддержки.
+Если пользователь пишет про прогулку, фильм, дождь, улицу, еду, день, усталость, одиночество, спорт, матч, игру, команду, счёт — реагируй как нормальный живой человек, а не как бот поддержки.
 
 Если есть явный риск самоповреждения, суицида или угрозы жизни:
 - отвечай очень бережно;
@@ -292,18 +300,38 @@ function getFallbackReply(text, profile = {}) {
     return "Давай.\n\nО чём хочется начать?";
   }
 
-  return "Понял.\n\nПродолжай.";
+  if (
+    t.includes("проигры") ||
+    t.includes("финал") ||
+    t.includes("матч") ||
+    t.includes("счёт") ||
+    /\b\d+\s*:\s*\d+\b/.test(t)
+  ) {
+    return "Блин, неприятно, когда переживаешь, а всё идёт не туда.\n\nЕсть ещё ощущение, что могут зацепиться?";
+  }
+
+  return "Понял тебя.\n\nЯ не хочу отвечать сухо, но сейчас у меня не получилось нормально достучаться до нейросети. Напиши ещё раз — попробую подхватить живее.";
 }
 
 // =========================
 // ОЧИСТКА ОТВЕТОВ AI
 // =========================
-function sanitizeAiReply(reply, originalText = "", profile = {}, history = []) {
-  if (!reply) return null;
+function sanitizeAiReply(reply, originalText = "", profile = {}, history = [], chatId = "unknown") {
+  if (!reply) {
+    logAiDiagnostic("sanitize-empty-input", { chatId });
+    return null;
+  }
 
   let text = reply.trim();
 
-  const bannedStarts = [
+  if (text.length < 2) {
+    logAiDiagnostic("sanitize-too-short", { chatId, length: text.length });
+    return null;
+  }
+
+  text = text.replace(/^Amio:\s*/i, "").trim();
+
+  const softStarts = [
     "Слышу тебя",
     "Я тебя слышу",
     "Понимаю тебя",
@@ -311,9 +339,13 @@ function sanitizeAiReply(reply, originalText = "", profile = {}, history = []) {
     "Это нормально",
   ];
 
-  for (const bad of bannedStarts) {
-    if (text.startsWith(bad)) {
-      return null;
+  for (const start of softStarts) {
+    if (text.startsWith(start)) {
+      logAiDiagnostic("soft-start-detected-but-not-blocked", {
+        chatId,
+        start,
+      });
+      break;
     }
   }
 
@@ -325,6 +357,7 @@ function sanitizeAiReply(reply, originalText = "", profile = {}, history = []) {
       lowerOriginal === "ты кто?") &&
     /ты зовут|меня зовут ты|просто "ты"/i.test(text)
   ) {
+    logAiDiagnostic("fixed-bot-name-answer", { chatId });
     return "Я Amio.";
   }
 
@@ -333,16 +366,18 @@ function sanitizeAiReply(reply, originalText = "", profile = {}, history = []) {
     lowerOriginal.includes("а меня как зовут") ||
     lowerOriginal.includes("ты помнишь, как меня зовут")
   ) {
+    logAiDiagnostic("fixed-user-name-answer", { chatId, hasName: Boolean(profile.name) });
     if (profile.name) return `Тебя зовут ${profile.name}.`;
     return "Ты ещё не говорил, как к тебе обращаться.";
   }
 
   const lastAssistant = [...history].reverse().find((m) => m.role === "assistant");
   if (lastAssistant && isTooSimilar(text, lastAssistant.content)) {
-    return null;
+    logAiDiagnostic("similar-to-last-assistant-but-not-blocked", {
+      chatId,
+      replyLength: text.length,
+    });
   }
-
-  if (text.length < 2) return null;
 
   return text;
 }
@@ -352,6 +387,7 @@ function sanitizeAiReply(reply, originalText = "", profile = {}, history = []) {
 // =========================
 async function askOpenRouter(chatId, userText) {
   if (!OPENROUTER_API_KEY) {
+    logAiDiagnostic("missing-openrouter-api-key", { chatId });
     return null;
   }
 
@@ -363,6 +399,12 @@ async function askOpenRouter(chatId, userText) {
     ...user.history,
     { role: "user", content: userText },
   ];
+
+  console.log("[Amio] OpenRouter request:", {
+    chatId,
+    model: OPENROUTER_MODEL,
+    historyMessages: user.history.length,
+  });
 
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -376,20 +418,45 @@ async function askOpenRouter(chatId, userText) {
       model: OPENROUTER_MODEL,
       messages,
       temperature: 0.8,
-      max_tokens: 300,
+      top_p: 0.9,
+      presence_penalty: 0.3,
+      frequency_penalty: 0.2,
+      max_tokens: 450,
     }),
   });
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => "");
-    console.error("OpenRouter error:", response.status, errorText);
+    logAiDiagnostic("openrouter-http-error", {
+      chatId,
+      status: response.status,
+      body: errorText.slice(0, 500),
+    });
     return null;
   }
 
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content?.trim();
+  const finishReason = data?.choices?.[0]?.finish_reason;
 
-  if (!content) return null;
+  console.log("[Amio] OpenRouter response:", {
+    chatId,
+    requestedModel: OPENROUTER_MODEL,
+    returnedModel: data?.model,
+    finishReason,
+    hasContent: Boolean(content),
+    contentLength: content ? content.length : 0,
+  });
+
+  if (!content) {
+    logAiDiagnostic("openrouter-empty-content", {
+      chatId,
+      returnedModel: data?.model,
+      finishReason,
+    });
+    return null;
+  }
+
   return content;
 }
 
@@ -501,15 +568,34 @@ bot.on("message", async (msg) => {
   pushHistory(chatId, "user", text);
 
   let aiReply = null;
+  let usedFallback = false;
 
   try {
-    aiReply = await askOpenRouter(chatId, text);
-    aiReply = sanitizeAiReply(aiReply, text, user.profile, user.history);
+    const rawAiReply = await askOpenRouter(chatId, text);
+    aiReply = sanitizeAiReply(rawAiReply, text, user.profile, user.history, chatId);
   } catch (error) {
+    logAiDiagnostic("ai-exception", {
+      chatId,
+      message: error?.message,
+    });
     console.error("AI error:", error);
   }
 
+  if (!aiReply) {
+    usedFallback = true;
+    logAiDiagnostic("fallback-used", {
+      chatId,
+      textLength: text.length,
+    });
+  }
+
   const reply = aiReply || getFallbackReply(text, user.profile);
+
+  console.log("[Amio] reply selected:", {
+    chatId,
+    source: usedFallback ? "fallback" : "ai",
+    length: reply.length,
+  });
 
   pushHistory(chatId, "assistant", reply);
 
