@@ -6,10 +6,17 @@ const TelegramBot = require("node-telegram-bot-api");
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openrouter/free";
+const BOOT_TIME = new Date().toISOString();
+const DEBUG_EVENTS_LIMIT = 60;
+const debugEvents = [];
 
-console.log(`[Amio] boot ${new Date().toISOString()}`);
+console.log(`[Amio] boot ${BOOT_TIME}`);
 console.log(`[Amio] OpenRouter model: ${OPENROUTER_MODEL}`);
-console.log("[Amio] redeploy marker: 2026-06-08-ai-diagnostics-v2");
+console.log("[Amio] redeploy marker: 2026-06-08-slash-debug-v3");
+pushDebugEvent("boot", {
+  model: OPENROUTER_MODEL,
+  hasOpenRouterKey: Boolean(OPENROUTER_API_KEY),
+});
 
 if (!TELEGRAM_TOKEN) {
   throw new Error("TELEGRAM_BOT_TOKEN is missing in env");
@@ -149,7 +156,89 @@ function isTooSimilar(a = "", b = "") {
   return false;
 }
 
+function truncateText(value, max = 220) {
+  const text =
+    typeof value === "string" ? value : JSON.stringify(value, null, 0) || "";
+
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (clean.length <= max) return clean;
+  return `${clean.slice(0, max)}…`;
+}
+
+function pushDebugEvent(type, details = {}) {
+  const event = {
+    time: new Date().toISOString(),
+    type,
+    ...details,
+  };
+
+  debugEvents.push(event);
+
+  while (debugEvents.length > DEBUG_EVENTS_LIMIT) {
+    debugEvents.shift();
+  }
+
+  return event;
+}
+
+function getDebugEventsForChat(chatId) {
+  const id = String(chatId);
+
+  return debugEvents
+    .filter((event) => !event.chatId || String(event.chatId) === id)
+    .slice(-20);
+}
+
+function clearDebugEventsForChat(chatId) {
+  const id = String(chatId);
+
+  for (let i = debugEvents.length - 1; i >= 0; i -= 1) {
+    if (String(debugEvents[i].chatId) === id) {
+      debugEvents.splice(i, 1);
+    }
+  }
+
+  pushDebugEvent("debug-cleared", { chatId });
+}
+
+function formatDebugReport(chatId, user) {
+  const events = getDebugEventsForChat(chatId);
+  const lines = [
+    "🛠 Amio debug report",
+    "",
+    `Boot: ${BOOT_TIME}`,
+    `Now: ${new Date().toISOString()}`,
+    `Chat ID: ${chatId}`,
+    `Model env: ${OPENROUTER_MODEL}`,
+    `OpenRouter key: ${OPENROUTER_API_KEY ? "present" : "missing"}`,
+    `Onboarding: ${user.onboardingStep}`,
+    `History messages: ${user.history.length}`,
+    `Profile: ${truncateText(user.profile, 500)}`,
+    "",
+    "Recent events:",
+  ];
+
+  if (!events.length) {
+    lines.push("— пока нет событий для этого чата");
+  } else {
+    events.forEach((event, index) => {
+      const { time, type, chatId: eventChatId, ...details } = event;
+      const timePart = time ? time.slice(11, 19) : "--:--:--";
+      lines.push(
+        `${index + 1}. ${timePart} ${type}: ${truncateText(details, 700)}`
+      );
+    });
+  }
+
+  const report = lines.join("\n");
+  return report.length > 3900
+    ? `${report.slice(0, 3800)}\n\n…обрезано. Используй /debug_clear и повтори тест.`
+    : report;
+}
+
 function logAiDiagnostic(reason, details = {}) {
+  pushDebugEvent(reason, details);
+
   console.warn("[Amio] AI diagnostic:", {
     reason,
     model: OPENROUTER_MODEL,
@@ -316,7 +405,13 @@ function getFallbackReply(text, profile = {}) {
 // =========================
 // ОЧИСТКА ОТВЕТОВ AI
 // =========================
-function sanitizeAiReply(reply, originalText = "", profile = {}, history = [], chatId = "unknown") {
+function sanitizeAiReply(
+  reply,
+  originalText = "",
+  profile = {},
+  history = [],
+  chatId = "unknown"
+) {
   if (!reply) {
     logAiDiagnostic("sanitize-empty-input", { chatId });
     return null;
@@ -366,7 +461,10 @@ function sanitizeAiReply(reply, originalText = "", profile = {}, history = [], c
     lowerOriginal.includes("а меня как зовут") ||
     lowerOriginal.includes("ты помнишь, как меня зовут")
   ) {
-    logAiDiagnostic("fixed-user-name-answer", { chatId, hasName: Boolean(profile.name) });
+    logAiDiagnostic("fixed-user-name-answer", {
+      chatId,
+      hasName: Boolean(profile.name),
+    });
     if (profile.name) return `Тебя зовут ${profile.name}.`;
     return "Ты ещё не говорил, как к тебе обращаться.";
   }
@@ -399,6 +497,14 @@ async function askOpenRouter(chatId, userText) {
     ...user.history,
     { role: "user", content: userText },
   ];
+
+  pushDebugEvent("openrouter-request", {
+    chatId,
+    model: OPENROUTER_MODEL,
+    historyMessages: user.history.length,
+    userTextLength: userText.length,
+    userTextPreview: userText.slice(0, 160),
+  });
 
   console.log("[Amio] OpenRouter request:", {
     chatId,
@@ -438,6 +544,16 @@ async function askOpenRouter(chatId, userText) {
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content?.trim();
   const finishReason = data?.choices?.[0]?.finish_reason;
+
+  pushDebugEvent("openrouter-response", {
+    chatId,
+    requestedModel: OPENROUTER_MODEL,
+    returnedModel: data?.model,
+    finishReason,
+    hasContent: Boolean(content),
+    contentLength: content ? content.length : 0,
+    contentPreview: content ? content.slice(0, 220) : "",
+  });
 
   console.log("[Amio] OpenRouter response:", {
     chatId,
@@ -527,11 +643,31 @@ bot.onText(/\/start/, async (msg) => {
   await startOnboarding(msg.chat.id);
 });
 
+bot.onText(/\/debug(?:@\w+)?/, async (msg) => {
+  const chatId = msg.chat.id;
+  const user = getUser(chatId);
+
+  pushDebugEvent("debug-command", { chatId });
+
+  return bot.sendMessage(chatId, formatDebugReport(chatId, user));
+});
+
+bot.onText(/\/debug_clear(?:@\w+)?/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  clearDebugEventsForChat(chatId);
+
+  return bot.sendMessage(
+    chatId,
+    "Debug-отчёт очищен для этого чата. Теперь отправь тестовое сообщение и вызови /debug."
+  );
+});
+
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
 
-  if (!text || text.startsWith("/start")) return;
+  if (!text || text.startsWith("/start") || text.startsWith("/debug")) return;
 
   const user = getUser(chatId);
 
@@ -559,6 +695,11 @@ bot.on("message", async (msg) => {
 
   const directReply = customDirectReply(text, user.profile);
   if (directReply) {
+    pushDebugEvent("direct-reply", {
+      chatId,
+      textPreview: text.slice(0, 160),
+      replyPreview: directReply.slice(0, 160),
+    });
     pushHistory(chatId, "user", text);
     pushHistory(chatId, "assistant", directReply);
     await simulateTyping(chatId, directReply);
@@ -590,6 +731,13 @@ bot.on("message", async (msg) => {
   }
 
   const reply = aiReply || getFallbackReply(text, user.profile);
+
+  pushDebugEvent("reply-selected", {
+    chatId,
+    source: usedFallback ? "fallback" : "ai",
+    length: reply.length,
+    replyPreview: reply.slice(0, 220),
+  });
 
   console.log("[Amio] reply selected:", {
     chatId,
