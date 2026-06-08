@@ -7,6 +7,10 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openrouter/free";
 
+console.log(`[Amio] boot ${new Date().toISOString()}`);
+console.log(`[Amio] OpenRouter model: ${OPENROUTER_MODEL}`);
+console.log("[Amio] redeploy marker: 2026-06-08-model-env-check");
+
 if (!TELEGRAM_TOKEN) {
   throw new Error("TELEGRAM_BOT_TOKEN is missing in env");
 }
@@ -423,7 +427,7 @@ async function handleOnboarding(chatId, text) {
 
     user.onboardingStep = "ask_tone";
 
-    return bot.sendMessage(chatId, "Какой стиль общения тебе ближе?", {
+    return bot.sendMessage(chatId, "Какой тон общения тебе ближе?", {
       reply_markup: toneKeyboard(),
     });
   }
@@ -432,152 +436,83 @@ async function handleOnboarding(chatId, text) {
     user.profile.tone = text;
     user.onboardingStep = "ask_support_mode";
 
-    return bot.sendMessage(chatId, "Когда тебе тяжело, что обычно нужнее?", {
+    return bot.sendMessage(chatId, "Как тебе обычно лучше помогать?", {
       reply_markup: supportModeKeyboard(),
     });
   }
 
   if (user.onboardingStep === "ask_support_mode") {
     user.profile.supportMode = text;
-    user.onboardingStep = "done";
+    user.onboardingStep = "ready";
 
     return bot.sendMessage(
       chatId,
-      `Спасибо${user.profile.name ? `, ${user.profile.name}` : ""}. Я запомнил настройки и буду общаться так, как тебе комфортно.`,
-      {
-        reply_markup: mainKeyboard(),
-      }
+      "Готово. Я настроился.\n\nМожешь просто написать мне, что происходит.",
+      { reply_markup: mainKeyboard() }
     );
   }
 }
 
 // =========================
-// НОРМАЛИЗАЦИЯ КНОПОК ДЛЯ AI
-// =========================
-function mapButtonToPrompt(text, profile = {}) {
-  const namePart = profile.name ? `Пользователя зовут ${profile.name}. ` : "";
-
-  switch (text) {
-    case "Мне тревожно":
-      return `${namePart}Пользователь написал: "Мне тревожно". Ответь как живой, спокойный человек. Без шаблонов, без фразы "я рядом", без психотерапевтического тона. Коротко откликнись и мягко продолжи разговор.`;
-
-    case "Мне одиноко":
-      return `${namePart}Пользователь написал: "Мне одиноко". Ответь тепло, по-человечески, без пафоса и без шаблонов поддержки.`;
-
-    case "Побудь рядом":
-      return `${namePart}Пользователь просит просто побыть рядом. Не давай технику, не анализируй. Просто ответь очень живо и спокойно, как человек в переписке.`;
-
-    case "Поговори со мной":
-      return `${namePart}Пользователь хочет обычного разговора. Ответь естественно, как хороший собеседник, а не как психолог.`;
-
-    case "Помоги собраться":
-      return `${namePart}Пользователь просит помочь собраться. Ответь конкретно, спокойно и очень по-человечески. Помоги начать с одного маленького шага.`;
-
-    default:
-      return text;
-  }
-}
-
-// =========================
-// ОТВЕТ ЧЕРЕЗ AI
-// =========================
-async function replyWithAI(chatId, originalText) {
-  const user = getUser(chatId);
-
-  const directReply = customDirectReply(originalText, user.profile);
-  if (directReply) {
-    pushHistory(chatId, "user", originalText);
-    pushHistory(chatId, "assistant", directReply);
-
-    await simulateTyping(chatId, directReply);
-
-    return bot.sendMessage(chatId, directReply, {
-      reply_markup: mainKeyboard(),
-    });
-  }
-
-  const aiInput = mapButtonToPrompt(originalText, user.profile);
-
-  pushHistory(chatId, "user", originalText);
-
-  let aiReply = null;
-  try {
-    aiReply = await askOpenRouter(chatId, aiInput);
-  } catch (e) {
-    console.error("AI request failed:", e);
-  }
-
-  aiReply = sanitizeAiReply(
-    aiReply,
-    originalText,
-    user.profile,
-    user.history
-  );
-
-  const finalReply = aiReply || getFallbackReply(originalText, user.profile);
-
-  pushHistory(chatId, "assistant", finalReply);
-
-  await simulateTyping(chatId, finalReply);
-
-  return bot.sendMessage(chatId, finalReply, {
-    reply_markup: mainKeyboard(),
-  });
-}
-
-// =========================
-// КОМАНДЫ
+// СООБЩЕНИЯ
 // =========================
 bot.onText(/\/start/, async (msg) => {
   await startOnboarding(msg.chat.id);
 });
 
-bot.onText(/\/reset/, async (msg) => {
-  await startOnboarding(msg.chat.id);
-});
-
-// =========================
-// ОСНОВНОЙ ОБРАБОТЧИК
-// =========================
 bot.on("message", async (msg) => {
-  try {
-    const chatId = msg.chat.id;
-    const text = msg.text?.trim();
+  const chatId = msg.chat.id;
+  const text = msg.text;
 
-    if (!text) return;
-    if (text === "/start" || text === "/reset") return;
+  if (!text || text.startsWith("/start")) return;
 
-    const user = getUser(chatId);
+  const user = getUser(chatId);
 
-    if (text === "🔄 Пройти опрос заново" || text === "⚙️ Настройки") {
-      return startOnboarding(chatId);
-    }
+  if (text === "🔄 Пройти опрос заново") {
+    return startOnboarding(chatId);
+  }
 
-    if (
-      user.onboardingStep === "ask_name" ||
-      user.onboardingStep === "ask_gender" ||
-      user.onboardingStep === "ask_tone" ||
-      user.onboardingStep === "ask_support_mode"
-    ) {
-      return handleOnboarding(chatId, text);
-    }
-
-    if (user.onboardingStep === "new") {
-      return startOnboarding(chatId);
-    }
-
-    return replyWithAI(chatId, text);
-  } catch (error) {
-    console.error("Bot error:", error);
-
+  if (text === "⚙️ Настройки") {
     return bot.sendMessage(
-      msg.chat.id,
-      "У меня сейчас что-то не сработало, но можешь написать ещё раз.",
-      {
-        reply_markup: mainKeyboard(),
-      }
+      chatId,
+      `Сейчас я настроен так:\n\nИмя: ${user.profile.name || "не указано"}\nОбращение: ${
+        user.profile.gender === "female"
+          ? "женский род"
+          : user.profile.gender === "male"
+          ? "мужской род"
+          : "без рода"
+      }\nТон: ${user.profile.tone}\nФормат поддержки: ${user.profile.supportMode}\n\nМожно пройти опрос заново.`,
+      { reply_markup: mainKeyboard() }
     );
   }
-});
 
-console.log("Bot is running...");
+  if (user.onboardingStep !== "ready") {
+    return handleOnboarding(chatId, text);
+  }
+
+  const directReply = customDirectReply(text, user.profile);
+  if (directReply) {
+    pushHistory(chatId, "user", text);
+    pushHistory(chatId, "assistant", directReply);
+    await simulateTyping(chatId, directReply);
+    return bot.sendMessage(chatId, directReply, { reply_markup: mainKeyboard() });
+  }
+
+  pushHistory(chatId, "user", text);
+
+  let aiReply = null;
+
+  try {
+    aiReply = await askOpenRouter(chatId, text);
+    aiReply = sanitizeAiReply(aiReply, text, user.profile, user.history);
+  } catch (error) {
+    console.error("AI error:", error);
+  }
+
+  const reply = aiReply || getFallbackReply(text, user.profile);
+
+  pushHistory(chatId, "assistant", reply);
+
+  await simulateTyping(chatId, reply);
+  return bot.sendMessage(chatId, reply, { reply_markup: mainKeyboard() });
+});
